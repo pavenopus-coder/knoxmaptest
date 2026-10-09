@@ -118,6 +118,9 @@ class Settings:
     parking_density: float = 1.0
     # How each building outline is fitted to the tile grid.
     building_alignment: str = "smart"
+    # Smart alignment's maximum angle from the grid before it leaves the
+    # mapped orientation alone. The default works well with noisy OSM outlines.
+    building_snap_degrees: float = 8.0
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -161,6 +164,9 @@ class Settings:
             kept["building_alignment"] = (
                 "rectangle" if old_straight or old_square >= 45 else
                 "real" if old_square <= 0 else "smart")
+        if "building_snap_degrees" not in data and "square_buildings" in data:
+            kept["building_snap_degrees"] = kept.get(
+                "square_buildings", cls().building_snap_degrees)
         return cls(**kept)
 
 
@@ -194,6 +200,7 @@ LIMITS = {
     "vanilla_tiles": (0, 1),
     "room_size": (16, 400),
     "building_alignment": (0, 3),
+    "building_snap_degrees": (0.0, 45.0),
     "square_buildings": (0, 45),
     "neighbourhood_tiles": (20, 2000),
     "style_oddity": (0.0, 1.0),

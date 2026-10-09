@@ -451,7 +451,8 @@ const SETTING_LABELS = {
   vanilla_tiles:       ['Vanilla tiles only', '1 builds with the game’s own art only, leaving Erika’s Tiles out even when it is installed. A map built with the mod needs the mod to look right, so this is the one to turn on before handing a map to somebody who has not subscribed.'],
   max_levels:          ['Tallest building', 'Storeys, up to 30 - as tall as the base game gets. OSM heights are capped to this. Tall cities take longer to compile.'],
   room_size:           ['Room size', 'Target room area in tiles before it gets split.'],
-  building_alignment:  ['Building alignment', 'Real preserves the mapped outline. Smart squares near-grid buildings. Rectilinear aligns the dominant wall direction while keeping the footprint shape. Rectangle uses a clean box.'],
+  building_alignment:  ['Building alignment', 'Real keeps the mapped angle and outline. Smart aligns near-grid buildings. Rectilinear turns the dominant wall direction to the grid while preserving the outline. Rectangle uses a clean box.'],
+  building_snap_degrees: ['Smart snap angle', 'Smart aligns a building when its dominant wall direction is within this many degrees of the tile grid. Smaller values keep more mapped angles.'],
   arch_style:         ['Architecture', 'Auto reads the map\u2019s own building names: a town written in Chinese gets flat-roofed masonry blocks, taller self-built houses and walk-up flats, the way it is really built there. Chinese forces that look. Default builds every town like the game\u2019s own Kentucky.'],
   neighbourhood_tiles: ['Neighbourhood', 'How far one set of materials reaches.'],
   style_oddity:        ['Odd one out', 'How often a building breaks from its block.'],
@@ -493,8 +494,8 @@ function buildSettingsForm(values) {
       : isChoice
       ? `<select data-key="${key}">${choices.map(([value, name]) =>
           `<option value="${value}"${value === values[key] ? ' selected' : ''}>${name}</option>`).join('')}</select>`
-      : `<input type="range" data-key="${key}" min="${lo}" max="${hi}"
-           step="${isInt ? 1 : 0.05}" value="${values[key]}">`;
+       : `<input type="range" data-key="${key}" min="${lo}" max="${hi}"
+         step="${key === 'building_snap_degrees' ? 0.5 : isInt ? 1 : 0.05}" value="${values[key]}">`;
     wrap.innerHTML = `
       <div class="setting-head"><span class="setting-name">${label}</span>
         ${key === 'seed' || isChoice || isToggle ? '' : `<output class="setting-val">${values[key]}</output>`}</div>

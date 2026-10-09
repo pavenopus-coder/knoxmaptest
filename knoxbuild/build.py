@@ -1433,13 +1433,13 @@ def build(out_dir: str, seed: int | None = None, min_size: int | None = None,
             # row_units - which is what it is anyway, works of that size
             # being several blocks wall to wall.
             fp, reason = place(px, occupied, min_side=min_size, max_side=1e9,
-                       snap_degrees=settings.square_buildings,
+                       snap_degrees=settings.building_snap_degrees,
                        avoid=road_weight, lots=lots,
                        alignment=settings.building_alignment)
             oversize = fp is not None
         else:
             fp, reason = place(px, occupied, min_side=min_size, max_side=max_size,
-                       snap_degrees=settings.square_buildings,
+                       snap_degrees=settings.building_snap_degrees,
                        avoid=road_weight, lots=lots,
                        alignment=settings.building_alignment)
             if fp is None and reason == "large":

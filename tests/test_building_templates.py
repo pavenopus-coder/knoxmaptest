@@ -10,6 +10,7 @@ import knoxpaths
 from generator.procedural_town import _building_size
 from knoxbuild.build import _make_one, _template_for_footprint
 from knoxbuild.footprint import Footprint
+from knoxbuild.repair import repair_project
 from knoxbuild.settings import Settings
 from knoxbuild.templates import (BuildingTemplate, TemplateCatalog,
                                  _family_for_path, configured_pool_path,
@@ -220,6 +221,36 @@ class BuildingTemplateTests(unittest.TestCase):
             self.assertEqual(destination.read_text(encoding="utf-8"),
                              "<generated/>")
             self.assertIsNone(result[3])
+
+    def test_compile_repair_keeps_pool_lots_but_checks_generated_lots(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "buildings").mkdir()
+            (root / "buildings" / "pool.tbx").write_text("<building/>")
+            (root / "buildings" / "generated.tbx").write_text("<building/>")
+            project = root / "town.pzw"
+            project.write_text(
+                '<world width="1" height="1">\n'
+                ' <cell x="0" y="0" map="">\n'
+                '  <lot x="1" y="1" level="0" width="8" height="8" '
+                'map="buildings/pool.tbx"/>\n'
+                '  <lot x="12" y="1" level="0" width="8" height="8" '
+                'map="buildings/generated.tbx"/>\n'
+                ' </cell>\n</world>\n', encoding="utf-8")
+            (root / "town_placements.csv").write_text(
+                "file,template\npool.tbx,Residential/house.tbx\n"
+                "generated.tbx,\n", encoding="utf-8")
+
+            with patch("knoxbuild.repair._check_building",
+                       return_value=["unknown tile enum"]) as check:
+                report = repair_project(project)
+
+            self.assertEqual(check.call_count, 1)
+            self.assertEqual(check.call_args.args[0].name, "generated.tbx")
+            self.assertEqual(len(report["dropped"]), 1)
+            repaired = project.read_text(encoding="utf-8")
+            self.assertIn('map="buildings/pool.tbx"', repaired)
+            self.assertNotIn('map="buildings/generated.tbx"', repaired)
 
 
 if __name__ == "__main__":

@@ -23,6 +23,7 @@ the log, and the original is kept as <map>.pzw.bak.
 """
 from __future__ import annotations
 
+import csv
 import os
 import re
 import shutil
@@ -43,6 +44,20 @@ def _check_building(path: Path) -> list[str]:
         sys.path.insert(0, str(tools))
     import validate_tbx
     return validate_tbx.check(str(path))
+
+
+def _template_lots(pzw: Path) -> set[str]:
+    """Building Pool lots use the game's catalogue, not KnoxMap's own enums."""
+    manifest = pzw.with_name(f"{pzw.stem}_placements.csv")
+    try:
+        with open(manifest, newline="", encoding="utf-8") as f:
+            return {
+                (row.get("file") or "").replace("\\", "/").rsplit("/", 1)[-1].casefold()
+                for row in csv.DictReader(f)
+                if row.get("template")
+            }
+    except (OSError, csv.Error):
+        return set()
 
 
 def repair_project(pzw: str | os.PathLike, check_buildings: bool = True) -> dict:
@@ -92,6 +107,7 @@ def repair_project(pzw: str | os.PathLike, check_buildings: bool = True) -> dict
         (tail if seen_cell else head).append(line)
 
     base = path.parent
+    template_lots = _template_lots(path)
     checked: dict[str, list[str]] = {}
     placed: dict[tuple[int, int], list] = {k: [] for k in order}
 
@@ -128,7 +144,9 @@ def repair_project(pzw: str | os.PathLike, check_buildings: bool = True) -> dict
                     target = (base / ref) if ref else None
                     if not ref or not target.is_file():
                         checked[ref] = ["the file is missing"]
-                    elif check_buildings and ref.lower().endswith(".tbx"):
+                    elif (check_buildings and ref.lower().endswith(".tbx")
+                          and ref.replace("\\", "/").rsplit("/", 1)[-1].casefold()
+                          not in template_lots):
                         try:
                             checked[ref] = _check_building(target)
                         except Exception as exc:  # noqa: BLE001 - unreadable counts as broken

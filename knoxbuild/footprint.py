@@ -20,6 +20,7 @@ SNAP_DEGREES = 8.0
 RECTANGULAR_ENOUGH = 0.86
 MIN_TILES = 16
 RECTILINEAR_SIMPLIFY_TOLERANCE = 1.0
+ORIENTATION_CLUSTER_TOLERANCE = 12.0
 
 BUILDING_ALIGNMENT_OPTIONS = {"real", "smart", "rectilinear", "rectangle"}
 
@@ -38,39 +39,66 @@ def _polygon(px: list[tuple[float, float]]):
     return poly
 
 
-def grid_angle(poly, rect=None) -> float:
-    """How far the building's long side is from the nearest grid axis, 0..45.
-
-    `rect` is the polygon's minimum rotated rectangle when the caller already
-    has it: working it out is the dearest thing Shapely does per building.
-    """
-    if rect is None:
-        rect = poly.minimum_rotated_rectangle
+def _rect_orientation(rect) -> float:
     if not hasattr(rect, "exterior"):
         return 0.0
     c = list(rect.exterior.coords)
+    if len(c) < 4:
+        return 0.0
     e1 = (c[1][0] - c[0][0], c[1][1] - c[0][1])
     e2 = (c[2][0] - c[1][0], c[2][1] - c[1][1])
     long_edge = e1 if math.hypot(*e1) >= math.hypot(*e2) else e2
-    a = abs(math.degrees(math.atan2(long_edge[1], long_edge[0]))) % 90.0
-    return min(a, 90.0 - a)
+    return (math.degrees(math.atan2(long_edge[1], long_edge[0])) + 45.0) % 90.0 - 45.0
+
+
+def _axis_distance(first: float, second: float) -> float:
+    return abs((first - second + 45.0) % 90.0 - 45.0)
+
+
+def _dominant_wall_angle(poly, rect=None) -> float:
+    """Estimate the main wall axis, in degrees from the nearest grid axis.
+
+    Long, consistently oriented wall runs vote together. This is less sensitive
+    than the minimum rectangle to a narrow wing or survey spike at the outline.
+    """
+    edges = []
+    for start, end in zip(poly.exterior.coords, list(poly.exterior.coords)[1:]):
+        dx, dy = end[0] - start[0], end[1] - start[1]
+        length = math.hypot(dx, dy)
+        if length > 1e-9:
+            angle = (math.degrees(math.atan2(dy, dx)) + 45.0) % 90.0 - 45.0
+            edges.append((angle, length))
+    if not edges:
+        return _rect_orientation(rect if rect is not None
+                                 else poly.minimum_rotated_rectangle)
+
+    best_axis = max(
+        (angle for angle, _length in edges),
+        key=lambda candidate: sum(
+            length for angle, length in edges
+            if _axis_distance(angle, candidate) <= ORIENTATION_CLUSTER_TOLERANCE))
+    cluster = [(angle, length) for angle, length in edges
+               if _axis_distance(angle, best_axis) <= ORIENTATION_CLUSTER_TOLERANCE]
+    x = sum(length * math.cos(math.radians(4.0 * angle))
+            for angle, length in cluster)
+    y = sum(length * math.sin(math.radians(4.0 * angle))
+            for angle, length in cluster)
+    if math.hypot(x, y) < 1e-9:
+        return best_axis
+    angle = math.degrees(math.atan2(y, x)) / 4.0
+    return (angle + 45.0) % 90.0 - 45.0
+
+
+def grid_angle(poly, rect=None) -> float:
+    """How far the dominant wall direction is from the nearest grid axis, 0..45."""
+    return abs(_dominant_wall_angle(
+        poly, rect if rect is not None else poly.minimum_rotated_rectangle))
 
 
 def _orthogonal_rotation(poly, rect=None) -> float:
-    """Rotation that takes the dominant wall direction to the nearest grid axis.
-
-    `rect` is the polygon's minimum rotated rectangle when the caller has it.
-    """
-    if rect is None:
-        rect = poly.minimum_rotated_rectangle
-    coords = list(rect.exterior.coords) if hasattr(rect, "exterior") else []
-    if len(coords) < 4:
-        return 0.0
-    edge1 = (coords[1][0] - coords[0][0], coords[1][1] - coords[0][1])
-    edge2 = (coords[2][0] - coords[1][0], coords[2][1] - coords[1][1])
-    long_edge = edge1 if math.hypot(*edge1) >= math.hypot(*edge2) else edge2
-    angle = math.degrees(math.atan2(long_edge[1], long_edge[0]))
-    return -((angle + 45.0) % 90.0 - 45.0)
+    """Rotation that takes the dominant wall direction to the nearest grid axis."""
+    return -_dominant_wall_angle(
+        poly, rect if rect is not None else poly.minimum_rotated_rectangle)
 
 
 def rectilinearize_polygon(poly):
@@ -384,7 +412,7 @@ def place(px: list[tuple[float, float]], occupied: np.ndarray,
         alignment = "smart"
     box_alignment = alignment == "rectangle" or (
         alignment == "smart" and angle <= snap_degrees
-        and (rectangular or snap_degrees >= 30))
+        and rectangular)
     rectilinear_alignment = (alignment == "rectilinear"
                              or (alignment == "smart" and not box_alignment
                                  and angle <= snap_degrees and not rectangular))

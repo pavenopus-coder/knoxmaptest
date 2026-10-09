@@ -4,7 +4,8 @@ import numpy as np
 from shapely.affinity import rotate, translate
 from shapely.geometry import Point, Polygon
 
-from knoxbuild.footprint import place, rectilinearize_polygon
+from knoxbuild.footprint import (grid_angle, place, rectilinearize_polygon,
+                                 _orthogonal_rotation)
 from knoxbuild.settings import Settings
 
 
@@ -67,6 +68,30 @@ class BuildingAlignment(unittest.TestCase):
         self.assertLess(len(clean.exterior.coords), len(rough.exterior.coords))
         self.assertLessEqual(abs(clean.area - rough.area), 1.0)
 
+    def test_orientation_follows_main_walls_not_a_narrow_diagonal_wing(self):
+        footprint = Polygon([
+            (0, 0), (30, 0), (30, 15), (45, 30), (44, 31),
+            (29, 16), (0, 15),
+        ])
+
+        self.assertLess(grid_angle(footprint), 1.0)
+        self.assertLess(abs(_orthogonal_rotation(footprint)), 1.0)
+
+    def test_smart_snap_angle_can_be_tuned(self):
+        source = Polygon([(0, 0), (10, 0), (10, 4), (4, 4), (4, 10), (0, 10)])
+        rotated = translate(rotate(source, 12, origin="centroid"),
+                            xoff=30, yoff=30)
+        coords = list(rotated.exterior.coords)
+        real, _ = place(coords, np.zeros((80, 80), dtype=bool), alignment="real")
+        narrow, _ = place(coords, np.zeros((80, 80), dtype=bool),
+                          snap_degrees=8, alignment="smart")
+        broad, _ = place(coords, np.zeros((80, 80), dtype=bool),
+                         snap_degrees=15, alignment="smart")
+
+        np.testing.assert_array_equal(narrow.mask, real.mask)
+        self.assertNotEqual((broad.width, broad.height),
+                            (real.width, real.height))
+
     def test_road_avoidance_moves_building_completely_clear(self):
         polygon = [(12, 12), (20, 12), (20, 20), (12, 20)]
         avoid = np.zeros((40, 40), dtype=bool)
@@ -94,8 +119,11 @@ class BuildingAlignment(unittest.TestCase):
         self.assertIsNotNone(footprint)
 
     def test_legacy_angle_settings_migrate(self):
+        self.assertEqual(Settings().building_snap_degrees, 8.0)
         self.assertEqual(Settings.from_dict({"square_buildings": 0}).building_alignment,
                          "real")
+        self.assertEqual(Settings.from_dict({"square_buildings": 15}).building_snap_degrees,
+                         15)
         self.assertEqual(Settings.from_dict({"square_buildings": 15}).building_alignment,
                          "smart")
         self.assertEqual(Settings.from_dict({"square_buildings": 45}).building_alignment,
@@ -105,6 +133,10 @@ class BuildingAlignment(unittest.TestCase):
         self.assertEqual(Settings.from_dict({"building_alignment": "rectilinear",
                                              "square_buildings": 0}).building_alignment,
                          "rectilinear")
+        self.assertEqual(Settings.from_dict({"building_alignment": "smart",
+                             "square_buildings": 15,
+                             "building_snap_degrees": 6}).building_snap_degrees,
+                 6)
 
     def test_settings_api_exposes_alignment_choices(self):
         from app import app
@@ -115,6 +147,8 @@ class BuildingAlignment(unittest.TestCase):
         self.assertEqual(body["types"]["building_alignment"], "enum")
         self.assertEqual([value for value, _label in body["options"]["building_alignment"]],
                          ["real", "smart", "rectilinear", "rectangle"])
+        self.assertEqual(body["defaults"]["building_snap_degrees"], 8.0)
+        self.assertEqual(body["limits"]["building_snap_degrees"], [0.0, 45.0])
 
 
 if __name__ == "__main__":
