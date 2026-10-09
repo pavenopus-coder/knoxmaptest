@@ -3,11 +3,17 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from shapely.geometry import Polygon
+from shapely.geometry import LineString, Point, Polygon, box
+from shapely.ops import unary_union
 
 from generator import osm
-from generator.procedural_town import (TownParameters, _building_size,
-                                       _line_near_rect, generate)
+from generator.procedural_town import (ROAD_DESIGN_RULES, TownParameters,
+                                       _building_size, _collector_stride,
+                                       _blocks_from_roads, _district_boundaries,
+                                       _district_spacing_scale, _line_near_rect,
+                                       _road_curve_scale, _road_shape_offset,
+                                       _street_curve_weight,
+                                       _road_grid, generate)
 from knoxbuild.footprint import place
 import numpy as np
 
@@ -27,6 +33,67 @@ class GridProjection:
 
 
 class ProceduralTownTests(unittest.TestCase):
+    def test_spacing_and_alignment_fade_smoothly_across_districts(self):
+        distances = (0, 80, 140, 220, 350, 500)
+        scales = [_district_spacing_scale(distance, 720, 100)
+                  for distance in distances]
+
+        self.assertEqual(scales[0], 0.68)
+        self.assertTrue(all(left <= right
+                            for left, right in zip(scales, scales[1:])))
+        self.assertTrue(0.68 < scales[1] < scales[2] < 1.0)
+        self.assertLess(_street_curve_weight(0, 100),
+                        _street_curve_weight(300, 100))
+        self.assertGreater(
+            _district_spacing_scale(0, 720, 100, 0, 130), scales[0])
+
+    def test_road_shapes_follow_class_specific_design_rules(self):
+        positions = range(0, 721, 20)
+        offsets = {
+            road: max(abs(_road_shape_offset(
+                position, 720, 120, road, 1, "organic", 0.2))
+                for position in positions)
+            for road in ("primary", "secondary", "residential", "service")
+        }
+
+        self.assertLess(offsets["primary"], offsets["secondary"])
+        self.assertLess(offsets["service"], offsets["residential"])
+
+    def test_district_boundaries_partition_the_map(self):
+        zones = _district_boundaries(
+            600, 500, [(300, 250)], (520, 250), 100, 0.5, 0.15, 0.2)
+        shapes = list(zones.values())
+
+        self.assertTrue(all(shapes[i].intersection(shapes[j]).area < 1e-6
+                            for i in range(len(shapes))
+                            for j in range(i + 1, len(shapes))))
+        self.assertAlmostEqual(unary_union(shapes).area, box(0, 0, 599, 499).area,
+                               delta=1e-4)
+
+    def test_blocks_are_polygonized_from_the_connected_road_network(self):
+        nodes = _road_grid(300, 300, (150, 150), 70, random.Random(13),
+                           "organic", 0.2)
+        roads = [LineString((nodes[row][col], nodes[row][col + 1]))
+                 for row in range(len(nodes))
+                 for col in range(len(nodes[row]) - 1)]
+        roads.extend(LineString((nodes[row][col], nodes[row + 1][col]))
+                     for row in range(len(nodes) - 1)
+                     for col in range(len(nodes[row])))
+
+        blocks = _blocks_from_roads(roads, 300, 300)
+
+        self.assertGreater(len(blocks), 8)
+        self.assertAlmostEqual(sum(block.area for block in blocks),
+                               299 * 299, delta=1.0)
+
+    def test_road_graph_rejects_dangling_internal_endpoints(self):
+        roads = [LineString([(5, 0), (5, 10)]),
+                 LineString([(0, 5), (10, 5)]),
+                 LineString([(5, 5), (7, 7)])]
+
+        with self.assertRaisesRegex(ValueError, "unconnected endpoint"):
+            _blocks_from_roads(roads, 11, 11)
+
     def test_seed_makes_the_same_features(self):
         params = TownParameters.from_dict({"seed": 42})
         first = generate(GridProjection(), params)
@@ -74,6 +141,101 @@ class ProceduralTownTests(unittest.TestCase):
         self.assertTrue(any(feature.tags.get("bridge") == "yes"
                             for feature in features))
         self.assertEqual(osm.classify(rivers[0].tags), "water")
+
+    def test_grid_roads_form_a_wide_main_cross_and_narrow_local_streets(self):
+        features = generate(
+            GridProjection(),
+            TownParameters.from_dict({
+                "seed": 32, "town_type": "compact_city",
+                "river_chance": 0, "park_chance": 0, "water_chance": 0,
+            }))
+        roads = [feature for feature in features if feature.tags.get("highway")]
+        widths = {road.tags["highway"]: int(road.tags["width"].split()[0])
+                  for road in roads}
+        self.assertGreater(widths["primary"], widths["secondary"])
+        self.assertGreater(widths["secondary"], widths["tertiary"])
+        self.assertGreater(widths["tertiary"], widths["residential"])
+
+        primary = [road for road in roads if road.tags["highway"] == "primary"]
+        primary_lines = [LineString([(lon, lat) for lat, lon in road.geometry])
+                 for road in primary]
+        self.assertTrue(any(left.intersects(right)
+                    for i, left in enumerate(primary_lines)
+                    for right in primary_lines[i + 1:]))
+
+    def test_design_speed_is_separate_and_controls_network_rules(self):
+        features = generate(
+            GridProjection(),
+            TownParameters.from_dict({
+                "seed": 23, "street_pattern": "grid", "river_chance": 0,
+                "park_chance": 0, "water_chance": 0,
+                "industrial_chance": 0.2,
+            }))
+        roads = [feature for feature in features if feature.tags.get("highway")]
+
+        for road in roads:
+            rules = ROAD_DESIGN_RULES[road.tags["highway"]]
+            self.assertEqual(road.tags["knoxmap:design_speed_kph"],
+                             rules["speed_kph"])
+            self.assertEqual(road.tags["knoxmap:intersection_spacing_m"],
+                             rules["intersection_spacing_m"])
+            self.assertNotEqual(road.tags["maxspeed"],
+                                f"{rules['speed_kph']} km/h")
+        self.assertGreater(_collector_stride(120), _collector_stride(180))
+        self.assertLess(_road_curve_scale("primary", 300, 120),
+                        _road_curve_scale("residential", 300, 120))
+
+    def test_commercial_core_corridors_and_industrial_edge_are_coherent(self):
+        features = generate(
+            GridProjection(),
+            TownParameters.from_dict({
+                "seed": 82, "street_pattern": "grid", "river_chance": 0,
+                "park_chance": 0, "water_chance": 0,
+                "commercial_chance": 0.5, "civic_chance": 0.15,
+                "industrial_chance": 0.2,
+            }))
+        landuses = [feature for feature in features if feature.tags.get("landuse")]
+        names = {feature.tags.get("name") for feature in landuses}
+        self.assertIn("Town Centre", names)
+        self.assertIn("Commercial Corridor", names)
+        industrial = [Polygon([(lon, lat) for lat, lon in feature.geometry])
+                      for feature in landuses
+                      if feature.tags.get("name") == "Industrial Estate"]
+        self.assertGreaterEqual(len(industrial), 2)
+        self.assertTrue(any(left.distance(right) <= 16
+                            for i, left in enumerate(industrial)
+                            for right in industrial[i + 1:]))
+        self.assertTrue(any(feature.tags.get("amenity") == "fuel"
+                            for feature in features))
+        self.assertTrue(any(feature.tags.get("tourism") == "motel"
+                            for feature in features))
+        self.assertTrue(any(feature.tags.get("name") == "Market Diagonal"
+                    for feature in features))
+        self.assertTrue(any(feature.tags.get("name") == "Freight Yard Turnaround"
+                    for feature in features))
+        railway = next(feature for feature in features
+                   if feature.tags.get("railway") == "rail")
+        rail_line = LineString([(lon, lat) for lat, lon in railway.geometry])
+        crossings = [feature for feature in features
+                 if feature.tags.get("railway_crossing") == "yes"]
+        self.assertTrue(crossings)
+        self.assertTrue(all(LineString([(lon, lat) for lat, lon in feature.geometry])
+                    .intersects(rail_line) for feature in crossings))
+
+    def test_transition_streets_include_mixed_use_buildings(self):
+        features = generate(
+            GridProjection(),
+            TownParameters.from_dict({
+                "seed": 42, "town_type": "compact_city",
+                "commercial_chance": 0.5, "civic_chance": 0.1,
+                "industrial_chance": 0.05, "river_chance": 0,
+                "park_chance": 0, "water_chance": 0,
+            }))
+
+        mixed_use = [feature for feature in features
+                     if feature.tags.get("building") == "apartments"
+                     and feature.tags.get("shop")]
+        self.assertTrue(mixed_use)
 
     def test_organic_streets_form_irregular_blocks_not_a_jittered_grid(self):
         features = generate(
@@ -233,6 +395,27 @@ class ProceduralTownTests(unittest.TestCase):
                 river_xy, min(x for x, _ in points), min(y for _, y in points),
                 max(x for x, _ in points), max(y for _, y in points), 18))
 
+    def test_rural_village_adds_a_road_along_the_riverbank(self):
+        features = generate(
+            GridProjection(),
+            TownParameters.from_dict({
+                "seed": 314, "town_type": "rural_village",
+                "river_chance": 1, "park_chance": 0, "water_chance": 0,
+            }))
+        river = next(feature for feature in features
+                     if feature.tags.get("waterway") == "river")
+        river_road = next(feature for feature in features
+                          if feature.tags.get("name") == "River Road")
+        river_line = LineString([(lon, lat) for lat, lon in river.geometry])
+        road_line = LineString([(lon, lat) for lat, lon in river_road.geometry])
+
+        self.assertGreater(road_line.distance(river_line), 4)
+        self.assertTrue(any(
+            min(x, y, GridProjection.width - 1 - x,
+                GridProjection.height - 1 - y) < 1e-5
+            for lat, lon in (river_road.geometry[0], river_road.geometry[-1])
+            for x, y in [(lon, lat)]))
+
     def test_homes_are_spread_along_frontages_with_yards_and_no_overlap(self):
         features = generate(
             GridProjection(),
@@ -254,6 +437,33 @@ class ProceduralTownTests(unittest.TestCase):
                 if index != j)
             for index, home in enumerate(homes))
         self.assertGreater(nearest[len(nearest) // 2], 6)
+
+    def test_residential_culdesacs_have_a_connected_turnaround(self):
+        features = generate(
+            GridProjection(),
+            TownParameters.from_dict({
+                "seed": 91, "town_type": "compact_city",
+                "street_pattern": "grid", "river_chance": 0,
+                "park_chance": 0, "water_chance": 0,
+                "commercial_chance": 0, "civic_chance": 0,
+                "industrial_chance": 0,
+            }))
+        courts = [feature for feature in features
+                  if feature.tags.get("name") == "Residential Court"]
+        loops = [feature for feature in courts
+                 if feature.geometry[0] == feature.geometry[-1]]
+        spurs = [feature for feature in courts
+                 if feature.geometry[0] != feature.geometry[-1]]
+        self.assertTrue(loops)
+        self.assertTrue(spurs)
+        loop_lines = [LineString([(lon, lat) for lat, lon in feature.geometry])
+                      for feature in loops]
+        spur_lines = [LineString([(lon, lat) for lat, lon in feature.geometry])
+                      for feature in spurs]
+        self.assertTrue(any(
+            min(loop.distance(Point(endpoint))
+                for endpoint in (spur.coords[0], spur.coords[-1])) < 1e-5
+            for loop in loop_lines for spur in spur_lines))
 
     def test_house_footprints_keep_real_world_size_at_coarser_scale(self):
         width, depth = _building_size(
